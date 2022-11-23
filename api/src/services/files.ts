@@ -46,50 +46,74 @@ export class FilesService extends ItemsService {
 			}
 		}
 
+		// Run all hooks that are attached to this event so the end user has the chance to augment or block the
+		// file that is about to be saved
+		const payloadAfterHooks =
+			opts?.emitEvents !== false
+				? await emitter.emitFilter(
+						'files.upload',
+						payload,
+						{
+							key: primaryKey,
+							collection: this.collection,
+							stream: stream,
+						},
+						{
+							database: this.knex,
+							schema: this.schema,
+							accountability: this.accountability,
+						}
+				  )
+				: payload;
+
 		if (primaryKey !== undefined) {
-			await this.updateOne(primaryKey, payload, { emitEvents: false });
+			await this.updateOne(primaryKey, payloadAfterHooks, { emitEvents: false });
 
 			// If the file you're uploading already exists, we'll consider this upload a replace. In that case, we'll
 			// delete the previously saved file and thumbnails to ensure they're generated fresh
-			const disk = storage.disk(payload.storage);
+			const disk = storage.disk(payloadAfterHooks.storage);
 
 			for await (const file of disk.flatList(String(primaryKey))) {
 				await disk.delete(file.path);
 			}
 		} else {
-			primaryKey = await this.createOne(payload, { emitEvents: false });
+			primaryKey = await this.createOne(payloadAfterHooks, { emitEvents: false });
 		}
 
 		const fileExtension =
-			path.extname(payload.filename_download) || (payload.type && '.' + extension(payload.type)) || '';
+			path.extname(payloadAfterHooks.filename_download) ||
+			(payloadAfterHooks.type && '.' + extension(payloadAfterHooks.type)) ||
+			'';
 
-		payload.filename_disk = primaryKey + (fileExtension || '');
+		payloadAfterHooks.filename_disk = primaryKey + (fileExtension || '');
 
-		if (!payload.type) {
-			payload.type = 'application/octet-stream';
+		if (!payloadAfterHooks.type) {
+			payloadAfterHooks.type = 'application/octet-stream';
 		}
 
 		try {
-			await storage.disk(data.storage).put(payload.filename_disk, stream, payload.type);
+			await storage.disk(data.storage).put(payloadAfterHooks.filename_disk, stream, payloadAfterHooks.type);
 		} catch (err: any) {
-			logger.warn(`Couldn't save file ${payload.filename_disk}`);
+			logger.warn(`Couldn't save file ${payloadAfterHooks.filename_disk}`);
 			logger.warn(err);
-			throw new ServiceUnavailableException(`Couldn't save file ${payload.filename_disk}`, { service: 'files' });
+			throw new ServiceUnavailableException(`Couldn't save file ${payloadAfterHooks.filename_disk}`, {
+				service: 'files',
+			});
 		}
 
-		const { size } = await storage.disk(data.storage).getStat(payload.filename_disk);
-		payload.filesize = size;
+		const { size } = await storage.disk(data.storage).getStat(payloadAfterHooks.filename_disk);
+		payloadAfterHooks.filesize = size;
 
-		if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff'].includes(payload.type)) {
-			const buffer = await storage.disk(data.storage).getBuffer(payload.filename_disk);
+		if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff'].includes(payloadAfterHooks.type)) {
+			const buffer = await storage.disk(data.storage).getBuffer(payloadAfterHooks.filename_disk);
 			const { height, width, description, title, tags, metadata } = await this.getMetadata(buffer.content);
 
-			payload.height ??= height;
-			payload.width ??= width;
-			payload.description ??= description;
-			payload.title ??= title;
-			payload.tags ??= tags;
-			payload.metadata ??= metadata;
+			payloadAfterHooks.height ??= height;
+			payloadAfterHooks.width ??= width;
+			payloadAfterHooks.description ??= description;
+			payloadAfterHooks.title ??= title;
+			payloadAfterHooks.tags ??= tags;
+			payloadAfterHooks.metadata ??= metadata;
 		}
 
 		// We do this in a service without accountability. Even if you don't have update permissions to the file,
@@ -99,7 +123,7 @@ export class FilesService extends ItemsService {
 			schema: this.schema,
 		});
 
-		await sudoService.updateOne(primaryKey, payload, { emitEvents: false });
+		await sudoService.updateOne(primaryKey, payloadAfterHooks, { emitEvents: false });
 
 		if (this.cache && env.CACHE_AUTO_PURGE) {
 			await this.cache.clear();
@@ -109,7 +133,7 @@ export class FilesService extends ItemsService {
 			emitter.emitAction(
 				'files.upload',
 				{
-					payload,
+					payloadAfterHooks,
 					key: primaryKey,
 					collection: this.collection,
 				},
